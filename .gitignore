@@ -1,1 +1,3 @@
 /venv
+processed_frames
+image_tensors.pt
