@@ -52,44 +52,32 @@ class KoopmanAutoencoder(nn.Module):
         n_size = output_feat.detach().flatten(start_dim=1).size(1)  # Compute flattened size safely
         self.num_flat_features = n_size
 
-    def forward(self, x):
+    def forward(self, x, apply_koopman=False, m=0):
         x = self.encoder_conv_layers(x)
         x = x.view(x.size(0), -1) #Flattening
         x = self.encoder_fc_layers(x)
         latent_vars = x.clone()  # Store latent variables before decoding
+        
         x = self.decoder_fc_layers(x)
         #Use stored shape for dynamic reshaping
         x = x.view(x.size(0), *self.final_conv_shape)
         x = self.decoder_conv_layers(x)
-        return x,latent_vars
 
+        #APPLYING KOOPMAN IF SPECIFIED TO DO SO
+        if apply_koopman:
+            
+            latent_vars_at_m = latent_vars
+            for i in range(m):
+                latent_vars_at_m = self.K(latent_vars_at_m)
+            
+            decoded_k = self.decoder_fc_layers(latent_vars_at_m)
+            decoded_k = decoded_k.view(decoded_k.size(0), *self.final_conv_shape)
+            decoded_k = self.decoder_conv_layers(decoded_k)
 
-
-
-def koopman_loss(reconstructed, latent_vars, m_latent_next, images_tensor, m_image_tensor, loss_fn,m): 
-    #Reconstruction loss (MSE between input and output)
-    recon_loss = loss_fn(reconstructed, images_tensor)
-    
-
-    #Linear Dynamics in latent spacez_future_true = model.encoder(X_future)              
-    # Apply K m times to z_current to get predicted future latent
-    for _ in range(m):
-        latent_next_predicted = model.K(latent_vars)  # if model.K is nn.Linear
+            return decoded_k,latent_vars_at_m #x and latent vars without K while latent_vars_at_m and decoded_k with K
         
-    lin_loss = loss_fn(latent_next_predicted, m_latent_next)    # ||φ(X_{k+m}) - K^m φ(X_k)||^2
-    # 3. Future state prediction: decode the predicted future latent and compare to X_{k+m}
-    #X_future_pred = model.decoder_fc_layers(latent_next_predicted.view(latent_next_predicted.size(0), -1))
-    #X_future_pred = X_future_pred.view(X_future_pred.size(0), *model.final_conv_shape)
-    x_decoded = model.decoder_fc_layers(latent_next_predicted)  # Decode FC layers
-    x_decoded = x_decoded.view(x_decoded.size(0), *model.final_conv_shape)  # Reshape
-    X_future_pred = model.decoder_conv_layers(x_decoded)  # Pass through conv layers
-    X_future_pred = X_future_pred[:, :, :images_tensor.shape[2], :images_tensor.shape[3]]
-    pred_loss = loss_fn(X_future_pred, m_image_tensor)        # ||X_{k+m} - φ^{-1}(K^m φ(X_k))||^2
-
-    #Total loss: weighted sum
-    total_loss = recon_loss + lin_loss + pred_loss   # add weighting coefficients later
-    return total_loss
-
+        return x,latent_vars
+    
 
 # Initialize model
 model = KoopmanAutoencoder(input_shape=(1, 556, 200))
@@ -98,50 +86,57 @@ model = KoopmanAutoencoder(input_shape=(1, 556, 200))
 loss_fn = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 images_tensor=images_tensor = torch.load('/Users/karim/desktop/eece499/TCN_SINDy/image_tensors.pt')
-#Generate X_current and X_future assuming m = 1 for simplicity
+
+
+#X_current and X_future assuming m = 1 for simplicity
 X_current = images_tensor[:-1]  #all but the last
 X_future = images_tensor[1:]    #all but the first
 
-latent_values = []
+num_epochs_phase1 = 2
+num_epochs_phase2 = 2
 
-# Training loop
-num_epochs = 20
-    
-for epoch in range(num_epochs):
-    total_loss = 0
-    for i in range(len(X_current)):
-        model.train()
+
+def train_autoencoder():
+    model.train()
+    for epoch in range(num_epochs_phase1):
         optimizer.zero_grad()
-        reconstructed, latent_vars = model(X_current[i].unsqueeze(0))  # current latent state
-        _, future_latent = model(X_future[i].unsqueeze(0))  # Future latent state
+        
+        reconstructed, latent_vars = model(images_tensor)
         reconstructed = reconstructed[:, :, :images_tensor.shape[2], :images_tensor.shape[3]]
-        # Assuming m = 1 for loss calculation
-        loss = koopman_loss(reconstructed, latent_vars, future_latent, X_current[i].unsqueeze(0), X_future[i].unsqueeze(0), loss_fn, 1)
+        
+        loss = loss_fn(reconstructed, images_tensor)
         loss.backward()
         optimizer.step()
-        total_loss += loss.item()
-    print(f"Epoch [{epoch+1}/{num_epochs}], Average Loss: {total_loss / len(X_current):.4f}")
-
-    model.eval()
-    with torch.no_grad():
-        _, epoch_latent_vars = model(X_current[0].unsqueeze(0))  # Using the first item as a sample
-        print(epoch_latent_vars)
-        latent_values.append(epoch_latent_vars.squeeze().cpu().numpy())  # Adjust based on your dimensions
+        print(f"Epoch: {epoch}, Loss: {loss.item():.4f}")
 
 
-latent_values = np.array(latent_values)
-print(latent_values)
+def train_koopman():
+    model.train()
+    for epoch in range(num_epochs_phase2):
+        for i in range(len(X_current)):
+            optimizer.zero_grad()
+
+            x_at_i_plus_m, latent_at_i_plus_m = model(X_future[i].unsqueeze(0))  
+            
+            reconstructed_at_i_plus_m_with_K, latent_at_i_plus_m_with_K = model(X_current[i].unsqueeze(0),True,1)
+            reconstructed_at_i_plus_m_with_K = reconstructed_at_i_plus_m_with_K[:, :, :images_tensor.shape[2], :images_tensor.shape[3]]
+            
+            loss = loss_fn(latent_at_i_plus_m,latent_at_i_plus_m_with_K) + loss_fn(X_future[i].unsqueeze(0),reconstructed_at_i_plus_m_with_K)
+            loss.backward()
+            optimizer.step()
+
+    print(f"Epoch: {epoch}, Loss: {loss.item():.4f}")
 
 
-plt.figure(figsize=(10, 5))
-for idx in range(latent_values.shape[1]):  # Assuming more than one latent dimension
-    plt.plot(range(num_epochs), latent_values[:, idx], label=f'Latent Variable {idx+1}')
+train_autoencoder()
+train_koopman()
 
-plt.xlabel('Epochs')
-plt.ylabel('Latent Variables')
-plt.title('Latent Variable Dynamics Across Epochs')
-plt.legend()
-plt.grid(True)
-plt.show()
+
+
+
+
+
+
+
 
 

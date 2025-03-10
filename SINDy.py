@@ -1,154 +1,123 @@
+import torch
+import torch.nn as nn
+from torchdiffeq import odeint as odeint_torch
 import numpy as np
-from scipy.special import binom
-from scipy.integrate import odeint
-import pdb  
+from SINDy_functions import jacobian
 
-def library_size(n, poly_order, use_sine=False, include_constant=True):
-    l = 0
-    for k in range(poly_order+1):
-        l += int(binom(n+k-1,k))
-    if use_sine:
-        l += n
-    if not include_constant:
-        l -= 1
-    return l
+class SINDy(nn.Module):
+    def __init__(self, dt, coefs, input_dim = 2, latent_dim = 2, library_dim = 6, poly_order = 2, l = {'l1': 1e-1, 'l2': 1e-1, 'l3': 1e-1, 'l4': 1e-1, 'l5': 1e-1, 'l6': 1e-1}):
 
-def sindy_library(X, poly_order, include_sine=False):
-    symbs = ['x', 'y', 'z', '4', '5', '6', '7']
-    m, n = X.shape
-    l = library_size(n, poly_order, include_sine, True)
-    library = np.ones((m, l))
-    sparse_weights = np.ones((l, n))
+        super(SINDy, self).__init__()
+        self.dt = dt
+        self.input_dim = input_dim
+        self.latent_dim = latent_dim
+        self.library_dim = library_dim
+        self.poly_order = poly_order
+        self.l = l
+        self.coefs = coefs
+        self.coefficients = nn.Parameter(coefs)
+
+    def phi(self, x):
+        library = [torch.ones(x.size(0), 1)]  # Bias term
+        for i in range(self.latent_dim):
+            library.append(x[:, i:i+1])  # Linear terms
+
+        if self.poly_order >= 2:
+            for i in range(self.latent_dim):
+                for j in range(i, self.latent_dim):
+                    library.append((x[:, i] * x[:, j]).unsqueeze(1))  # Second order terms
+
+        # Adding sine terms for each variable
+        for i in range(self.latent_dim):
+            library.append(torch.sin(x[:, i:i+1]))
+
+        return torch.cat(library, dim=1)
+
+    def phi_t(self, x, t):
+        library = [torch.ones(x.size(0), 1)]  # Bias term
+        for i in range(self.latent_dim):
+            library.append(x[:, i:i+1])  # Linear terms
+
+        if self.poly_order >= 2:
+            for i in range(self.latent_dim):
+                for j in range(i, self.latent_dim):
+                    library.append((x[:, i] * x[:, j]).unsqueeze(1))  # Second order terms
+
+        # Adding sine terms for each variable
+        for i in range(self.latent_dim):
+            library.append(torch.sin(x[:, i:i+1]))
+
+        # Incorporating time into the library
+        library_with_t = [entry * t.unsqueeze(1) for entry in library]
+        library_with_t2 = [entry * torch.pow(t, 2).unsqueeze(1) for entry in library]
+        library.extend(library_with_t)
+        library.extend(library_with_t2)
+
+        return torch.cat(library, dim=1)
+
+    def SINDy_num(self, x):
+        dxdt = torch.matmul(self.phi(x), self.coefficients)
+        return dxdt
     
-    index = 1
-    names = ['1']
+    def SINDy_num_t(self, t, x):
+        dxdt = torch.matmul(self.phi_t(x,t), self.coefficients)
+        return dxdt
+    
+    def integrate(self, x0, t):
+        try:
+            x_pred = odeint_torch(self.SINDy_num, x0, t) 
+        except AssertionError as error:
+            print(error)
+            return None 
+        return x_pred
+    
+    def Loss(self, v, dvdt, criterion):
 
-    for i in range(n):
-        library[:,index] = X[:,i]
-        sparse_weights[index, :] *= 1
-        names.append(symbs[i])
-        index += 1
+        with torch.autograd.enable_grad():
+            x = self.encoder(v) #ur latent variables 
+            v_bar = self.decoder(x)
 
-    if poly_order > 1:
-        for i in range(n):
-            for j in range(i,n):
-                library[:,index] = X[:,i]*X[:,j]
-                sparse_weights[index, :] *= 2
-                names.append(symbs[i]+symbs[j])
-                index += 1
+        time = torch.tensor(np.linspace(0, self.dt*len(x), len(x), endpoint=False),requires_grad=False, dtype=torch.float32)
+        time_int = torch.tensor(np.linspace(0, self.dt*self.t_int, self.t_int, endpoint=False),requires_grad=False, dtype=torch.float32) # to be used in integration
+            
+        loss = 0
 
-    if poly_order > 2:
-        for i in range(n):
-            for j in range(i,n):
-                for k in range(j,n):
-                    library[:,index] = X[:,i]*X[:,j]*X[:,k]
-                    sparse_weights[index, :] *= 3
-                    names.append(symbs[i]+symbs[j]+symbs[k])
-                    index += 1
+        if self.l['l1'] > 0:
+            loss += criterion(x[:,0], v[:,0])*self.l['l1']
 
-    if poly_order > 3:
-        for i in range(n):
-            for j in range(i,n):
-                for k in range(j,n):
-                    for q in range(k,n):
-                        library[:,index] = X[:,i]*X[:,j]*X[:,k]*X[:,q]
-                        sparse_weights[index, :] *= 4
-                        names.append(symbs[i]+symbs[j]+symbs[k]+symbs[q])
-                        index += 1
+        if self.l['l2'] > 0:
+            loss += criterion(v, v_bar)*self.l['l2']
 
-    if poly_order > 4:
-        for i in range(n):
-            for j in range(i,n):
-                for k in range(j,n):
-                    for q in range(k,n):
-                        for r in range(q,n):
-                            library[:,index] = X[:,i]*X[:,j]*X[:,k]*X[:,q]*X[:,r]
-                            sparse_weights[index, :] *= 5
-                            names.append(symbs[i]+symbs[j]+symbs[k]+symbs[q]+symbs[r])
-                            index += 1
+        if self.l['l3'] > 0 or self.l['l4'] > 0:
 
-    if include_sine:
-        for i in range(n):
-            library[:,index] = np.sin(X[:,i])
-            names.append('sin('+symbs[i]+')')
-            index += 1
+            dxdt_SINDy = self.SINDy_num(time, x)
+
+            with torch.autograd.enable_grad():
+                dxdv = jacobian(x, v)
+            dxdt = torch.einsum('ijk,ij->ik', dxdv[1:], dvdt[1:])
+
+            with torch.autograd.enable_grad():
+                dvdx = jacobian(v_bar, x)
+            dvdt_dec = torch.einsum('ijk,ij->ik', dvdx[1:], dxdt_SINDy[1:])
+
+            loss += criterion(dxdt, dxdt_SINDy[1:])*self.l['l3']
+            loss += criterion(dvdt_dec, dvdt[1:])*self.l['l4']
+
+        if self.l['l5'] > 0:
+            loss += torch.norm(self.coefficients, 1)*self.l['l5']
+
+        if self.l['l6'] > 0:
+            sol = x[:len(time_int)] 
+            loss += criterion(sol[:, 0], v[:, 0][:len(sol[:,0])])
+            for j in range(self.latent_dim - 1):
+                for i in range(1, self.tau + 1):
+                    k1 = self.SINDy_num(time_int, sol)
+                    k2 = self.SINDy_num(time_int, sol + self.dt/2 * k1)
+                    k3 = self.SINDy_num(time_int, sol + self.dt/2 * k2)
+                    k4 = self.SINDy_num(time_int, sol + self.dt * k3)
+                    sol = sol + 1/6 * self.dt * (k1 + 2*k2 + 2*k3 + k4) 
+                loss += criterion(sol[:,0], v[:,j+1][:len(sol[:,0])])
+
         
-    return_list = [library]
-    return return_list
-
-
-def sindy_fit(RHS, LHS, coefficient_threshold):
-    m,n = LHS.shape
-    Xi = np.linalg.lstsq(RHS,LHS, rcond=None)[0]
+        return loss
     
-    for k in range(10):
-        small_inds = (np.abs(Xi) < coefficient_threshold)
-        Xi[small_inds] = 0
-        for i in range(n):
-            big_inds = ~small_inds[:,i]
-            if np.where(big_inds)[0].size == 0:
-                continue
-            Xi[big_inds,i] = np.linalg.lstsq(RHS[:,big_inds], LHS[:,i], rcond=None)[0]
-    return Xi
-
-
-def sindy_simulate(x0, t, Xi, poly_order, include_sine=False, exact_features=False):
-    m = t.size
-    n = x0.size
-    f = lambda x,t : np.dot(sindy_library(np.array(x).reshape((1,n)), poly_order, include_sine, include_names=False, exact_features=exact_features), Xi).reshape((n,))
-    x = odeint(f, x0, t)
-    return x
-
-
-
-
-
-#TO ONLY GET NAMES OF OUR VARIABLES WITHOUT COMPUTING THE LIBRARY
-def sindy_library_names(latent_dim, poly_order, include_sine=False):
-    # Upgrade to combinations
-    symbs = ['x', 'y', 'z', '4', '5', '6', '7']
-     
-    n = latent_dim
-    index = 1
-    names = ['1']
-
-    for i in range(n):
-        names.append(symbs[i])
-        index += 1
-
-    if poly_order > 1:
-        for i in range(n):
-            for j in range(i,n):
-                names.append(symbs[i]+symbs[j])
-                index += 1
-
-    if poly_order > 2:
-        for i in range(n):
-            for j in range(i,n):
-                for k in range(j,n):
-                    names.append(symbs[i]+symbs[j]+symbs[k])
-                    index += 1
-
-    if poly_order > 3:
-        for i in range(n):
-            for j in range(i,n):
-                for k in range(j,n):
-                    for q in range(k,n):
-                        names.append(symbs[i]+symbs[j]+symbs[k]+symbs[q])
-                        index += 1
-                    
-    if poly_order > 4:
-        for i in range(n):
-            for j in range(i,n):
-                for k in range(j,n):
-                    for q in range(k,n):
-                        for r in range(q,n):
-                            names.append(symbs[i]+symbs[j]+symbs[k]+symbs[q]+symbs[r])
-                            index += 1
-
-    if include_sine:
-        for i in range(n):
-            names.append('sin('+symbs[i]+')')
-            index += 1
-    
-    return names

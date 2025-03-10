@@ -67,35 +67,37 @@ class ConvNetAutoencoder_basic(nn.Module):
 images_tensor = torch.load('/Users/karim/desktop/eece499/TCN_SINDy/image_tensors.pt')
 
 model = ConvNetAutoencoder_basic(input_shape=(1, 556, 200))
-
 loss_fn = nn.MSELoss()
-
 optimizer = optim.Adam(model.parameters(), lr=0.001)
-
 num_epochs = 20
-
 
 for epoch in range(num_epochs):
     model.train()
     optimizer.zero_grad()
-
-    images_tensor = images_tensor
-    
     reconstructed, latent_vars = model(images_tensor)
-
-    # Fix size mismatch
     reconstructed = reconstructed[:, :, :images_tensor.shape[2], :images_tensor.shape[3]]
-
-    # Compute loss
     loss = loss_fn(reconstructed, images_tensor)
-
-    # Backpropagation
     loss.backward()
     optimizer.step()
+    print(f"Epoch: {epoch}, Loss: {loss.item():.4f}")
 
-    print(f"Epoch [{epoch+1}/{num_epochs}], Reconstruction Loss: {loss.item():.4f}")
 
-model.eval()  
+latent_values = []
+epoch_values = []
 
+model.eval()
+# Forward pass to get the latent variable
 with torch.no_grad():
-    reconstructed, latent_vars = model(images_tensor)
+    xe = model.encoder_conv_layers(images_tensor[1])
+    xe = xe.view(xe.size(0), -1)
+    latent_variable = model.encoder_fc_layers(xe)
+
+# Convert the lists to numpy arrays for plotting
+latent_values = latent_variable.numpy() 
+
+# Plot the latent variable as a function of epochs
+plt.plot(latent_values)
+plt.xlabel('Epochs')
+plt.ylabel('Latent Variable')
+plt.title('Latent Variable as a Function of Epochs')
+plt.show()

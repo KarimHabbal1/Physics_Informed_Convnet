@@ -4,44 +4,39 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import matplotlib.pyplot as plt
-from torchdiffeq import odeint as odeint_torch
+from torchdiffeq import odeint as odeint_torch 
 
 
-def jacobian(y, x, create_graph=False, retain_graph=True, allow_unused=False):
-    jac = []
-    for i in range(y.shape[-1]):
-        jac_i = torch.autograd.grad(
-            y[..., i], x, torch.ones_like(y[..., i]), allow_unused=allow_unused, retain_graph=retain_graph, create_graph=create_graph)[0]
-        jac.append(jac_i)
-    return torch.stack(jac, dim=-1)
-
-class ConvNetAutoencoder(nn.Module):
-    def __init__(self, input_shape):
-        super(ConvNetAutoencoder, self).__init__()
-        self.encoder_conv_layers = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=3, stride=2, padding=1),
+class ConvNetAutoencoderSINDy(nn.Module):
+    def __init__(self, input_shape, latent_dim=2, poly_order=2):
+        super(ConvNetAutoencoderSINDy, self).__init__()
+        self.encoder_conv_layer = nn.Sequential(
+            nn.Conv2d(1,16,kernel_size=3,stride=2,padding=1),
             nn.ReLU(),
-            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(16,32,kernel_size=3,stride=2,padding=1),
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(32,64,kernel_size=3,stride=2,padding=1),
+            nn.ReLU()
         )
-        
-        # Compute conv output shape
-        self._get_conv_output(input_shape)
 
-        self.encoder_fc_layers = nn.Sequential(
-            nn.Linear(self.num_flat_features, 128),
+        self.get_conv_output(input_shape)
+
+        self.fully_connected_encoder=nn.Sequential(
+            nn.Linear(self.num_flat_features,128),
             nn.ELU(),
-            nn.Linear(128, 2),  # 2D latent space
+            nn.Linear(128,2)
         )
 
-        self.decoder_fc_layers = nn.Sequential(
-            nn.Linear(2, 128),
+        #NOW I WANT TO USE SINDY ON THESE TWO LATENT VARIABLES
+        #I NEED TO BE ABLE TO GET THE FLATTENED TENSOR AND TAKE IT AS MY X
+
+        self.fully_connected_decoder=nn.Sequential(
+            nn.Linear(2,128),
             nn.ELU(),
-            nn.Linear(128, self.num_flat_features),
+            nn.Linear(128,self.num_flat_features)
         )
 
-        self.decoder_conv_layers = nn.Sequential(
+        self.decoder_conv_layer = nn.Sequential(
             nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1),
             nn.ReLU(),
             nn.ConvTranspose2d(32, 16, kernel_size=3, stride=2, padding=1, output_padding=1),
@@ -49,39 +44,34 @@ class ConvNetAutoencoder(nn.Module):
             nn.ConvTranspose2d(16, 1, kernel_size=3, stride=2, padding=1, output_padding=1),
         )
 
-    def _get_conv_output(self, shape):
-        bs = 1  # Batch size for testing shape
-        input_tensor = torch.randn(bs, *shape)
+
+    def get_conv_output(self,input_shape):
+        input_tensor=torch.randn(1,*input_shape)
         with torch.no_grad():
             output_feat = self.encoder_conv_layers(input_tensor)
-        self.final_conv_shape = output_feat.shape[1:]
-        self.num_flat_features = output_feat.flatten(start_dim=1).size(1)
+        self.final_conv_shape=output_feat.shape[1:]
+        n_size=output_feat.detach().flatten(start_dim=1).size(1)
+        self.num_flat_features = n_size
 
-    def forward(self, x):
-        x = self.encoder_conv_layers(x)
-        x = x.view(x.size(0), -1)  # Flatten
-        latent_vars = self.encoder_fc_layers(x)
-        x = self.decoder_fc_layers(latent_vars)
-        x = x.view(x.size(0), *self.final_conv_shape)
-        x = self.decoder_conv_layers(x)
-        return x, latent_vars
+    def conv_decode(self, v):
+        decoded = self.decoder_conv_layer(v)
+        return decoded
 
+    def conv_encode(self, v):
+        encoded = self.encoder_conv_layer(v)
+        return encoded
+    
+    def fc_decode(self, x):
+        decoded = self.fully_connected_decoder(x)
+        return decoded
 
-class SAE(nn.Module):
-    def __init__(self, dt, t_int, tau, coefs, input_dim=2, latent_dim=2, library_dim=6, poly_order=2, l=None):
-        super(SAE, self).__init__()
-        self.dt = dt
-        self.t_int = t_int
-        self.tau = tau
-        self.input_dim = input_dim
-        self.latent_dim = latent_dim
-        self.library_dim = library_dim
-        self.poly_order = poly_order
-        self.l = l if l else {'l1': 1e-1, 'l2': 1e-1, 'l3': 1e-1, 'l4': 1e-1, 'l5': 1e-1, 'l6': 1e-1}
-        self.coefficients = nn.Parameter(coefs)
+    def fc_encode(self, x):
+        encoded = self.fully_connected_encoder(x)
+        return encoded
 
     def phi(self, x): 
-        library = [torch.ones(x.size(0), 1)]
+
+        library = [torch.ones(x.size(0), 1)] 
         for i in range(self.latent_dim):
             library.append(x[:, i].unsqueeze(1)) 
         
@@ -89,27 +79,87 @@ class SAE(nn.Module):
             for i in range(self.latent_dim):
                 for j in range(i, self.latent_dim):
                     library.append((x[:, i] * x[:, j]).unsqueeze(1)) 
+        
+        for i in range(self.latent_dim):
+            library.append(torch.sin(x[:, i]).unsqueeze(1))
 
         return torch.cat(library, dim=1)
 
-    def SINDy_num(self, time, x):
-        return torch.matmul(self.phi(x), self.coefficients)
+    def phi_t(self, x, t): #For t i will use either index of frame or timestamp code for timestamp is in video processing
+        library = [torch.ones(x.size(0), 1)]  # Constant term
+        
+        # Add linear terms
+        for i in range(self.latent_dim):
+            library.append(x[:, i].unsqueeze(1))
+        
+        # Add polynomial terms (second order)
+        if self.poly_order >= 2:
+            for i in range(self.latent_dim):
+                for j in range(i, self.latent_dim):
+                    library.append((x[:, i] * x[:, j]).unsqueeze(1))
+        
+        # Add sine terms only for each variable, without interactions
+        for i in range(self.latent_dim):
+            library.append(torch.sin(x[:, i]).unsqueeze(1))
+        
+        # Include time-dependent terms if t is not None
+        if t is not None:
+            t = t.view(-1, 1)  # Ensure t is a column vector
+            # Time-dependent terms for each entry in the library
+            library_with_t = [entry * t for entry in library]
+            library_with_t2 = [entry * torch.pow(t, 2) for entry in library]
+            library.extend(library_with_t)
+            library.extend(library_with_t2)
 
+        return torch.cat(library, dim=1) 
+    
+    def SINDy_num(self, x): #phi(x)coeff
+        dxdt = torch.matmul(self.phi(x), self.coefficients)
+        return dxdt
+    
+    def SINDy_num_t(self, t, x):
+        dxdt = torch.matmul(self.phi_t(x,t), self.coefficients)
+        return dxdt
+    
     def integrate(self, x0, t):
-        return odeint_torch(self.SINDy_num, x0, t)
+        try:
+            x_pred = odeint_torch(self.SINDy_num, x0, t) 
+        except AssertionError as error:
+            print(error)
+            return None 
+        return x_pred
+    
+    def forward(self, x):
+        encoded = self.encoder_conv_layer(x)  # Apply convolutional layers
+        encoded = encoded.view(encoded.size(0), -1)  # Flatten the features for the fully connected layer
+        latent = self.fully_connected_encoder(encoded)  # Get the latent space representation
 
-    def loss(self, latent_vars, dvdt, criterion):
-        dxdt_SINDy = self.SINDy_num(torch.tensor(np.linspace(0, self.dt*len(latent_vars), len(latent_vars))), latent_vars)
-        loss = criterion(dvdt, dxdt_SINDy) * self.l['l3']
-        loss += torch.norm(self.coefficients, 1) * self.l['l5']
-        return loss
+        # Decoding the latent representation
+        decoded = self.fully_connected_decoder(latent)
+        decoded = decoded.view(decoded.size(0), 64, *self.final_conv_shape[1:])  # Reshape to match the input of the decoder conv layers
+        decoded = self.decoder_conv_layers(decoded)  # Apply decoder convolutional layers
+
+        return decoded, latent
 
 
+
+    
+
+
+
+
+
+
+
+
+
+
+
+'''
 images_tensor = torch.load('/Users/karim/desktop/eece499/TCN_SINDy/image_tensors.pt')
-
 autoencoder = ConvNetAutoencoder(input_shape=(1, 556, 200))
 coefs = torch.zeros(6, 2, requires_grad=True, dtype=torch.float32)
-sindy_model = SAE(dt=0.01, t_int=10, tau=5, coefs=coefs)
+sindy_model = SINDy(dt=0.01, t_int=10, tau=5, coefs=coefs)
 # Define loss function and optimizers
 recon_loss_fn = nn.MSELoss()
 optimizer = optim.Adam(list(autoencoder.parameters()) + list(sindy_model.parameters()), lr=0.001)
@@ -153,3 +203,4 @@ with torch.no_grad():
     sindy_pred = sindy_model.SINDy_num(torch.tensor(np.linspace(0, 0.01 * len(latent_vars), len(latent_vars))), latent_vars)
 
     print(f"Final SINDy Prediction: {sindy_pred}")
+'''
