@@ -69,7 +69,7 @@ images_tensor = torch.load('/Users/karim/desktop/eece499/TCN_SINDy/image_tensors
 model = ConvNetAutoencoder_basic(input_shape=(1, 556, 200))
 loss_fn = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
-num_epochs = 20
+num_epochs = 200
 
 for epoch in range(num_epochs):
     model.train()
