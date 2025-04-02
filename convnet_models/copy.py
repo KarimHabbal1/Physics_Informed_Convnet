@@ -42,7 +42,7 @@ class ConvNetAutoencoder_basic(nn.Module):
             nn.ReLU(),
             nn.ConvTranspose2d(16, 1, kernel_size=3, stride=2, padding=1, output_padding=1),
         )
-
+        
     def _get_conv_output(self, shape):
         bs = 1  # Batch size of 1 for testing output shape
         input_tensor = torch.randn(bs, *shape)  # Generate a random tensor without Variable
@@ -65,39 +65,80 @@ class ConvNetAutoencoder_basic(nn.Module):
 
 
 images_tensor = torch.load('/Users/karim/desktop/eece499/TCN_SINDy/image_tensors.pt')
+images_tensor = F.pad(images_tensor, (0, 0, 2, 2))  # (left, right, top, bottom)
 
-model = ConvNetAutoencoder_basic(input_shape=(1, 556, 200))
+
+model = ConvNetAutoencoder_basic(input_shape=(1, 560, 200))
 loss_fn = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
-num_epochs = 200
+num_epochs = 1
+losses = []
+patience = 1
+min_delta = 0.01  
+latent_epoch_data = []
+converged = False
 
 for epoch in range(num_epochs):
+    if converged:
+        break
     model.train()
     optimizer.zero_grad()
     reconstructed, latent_vars = model(images_tensor)
-    reconstructed = reconstructed[:, :, :images_tensor.shape[2], :images_tensor.shape[3]]
     loss = loss_fn(reconstructed, images_tensor)
     loss.backward()
     optimizer.step()
+    losses.append(loss.item())
     print(f"Epoch: {epoch}, Loss: {loss.item():.4f}")
+
+    if epoch > 0 and (losses[-2] - losses[-1] < min_delta):
+        if patience > 0:
+            patience -= 1
+        else:
+            print("Early stopping as the model has converged.")
+            converged=True
+
+    if epoch % 50 == 0:
+        latent_epoch_data.append(latent_vars.detach().cpu().numpy())
+
 
 
 latent_values = []
-epoch_values = []
 
 model.eval()
 # Forward pass to get the latent variable
 with torch.no_grad():
-    xe = model.encoder_conv_layers(images_tensor[1])
+    xe = model.encoder_conv_layers(images_tensor)
     xe = xe.view(xe.size(0), -1)
     latent_variable = model.encoder_fc_layers(xe)
 
 # Convert the lists to numpy arrays for plotting
 latent_values = latent_variable.numpy() 
 
+
+plt.plot(losses, label='Loss per Epoch')
+plt.xlabel('Epochs')
+plt.ylabel('Loss')
+plt.title('Loss as a Function of Epochs')
+plt.legend()
+plt.show()
+
+
+for index, latent_vars_at_epoch in enumerate(latent_epoch_data):
+    plt.figure()
+    for var_idx in range(latent_vars_at_epoch.shape[1]):  
+        plt.plot(latent_vars_at_epoch[:, var_idx], label=f'Latent Variable {var_idx + 1}')
+    plt.xlabel('Frame')
+    plt.ylabel('Latent Variable')
+    plt.title(f'Latent Variable as a Function of Frames at Epoch {index * 50}')
+    plt.legend()
+    plt.show()
+
+
+
 # Plot the latent variable as a function of epochs
 plt.plot(latent_values)
-plt.xlabel('Epochs')
+plt.xlabel('Frame')
 plt.ylabel('Latent Variable')
-plt.title('Latent Variable as a Function of Epochs')
+plt.title('Latent Variable as a Function of Frames After optimization')
 plt.show()
+
