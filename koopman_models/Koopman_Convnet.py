@@ -85,7 +85,7 @@ model = KoopmanAutoencoder(input_shape=(1, 556, 200))
 # Define loss function and optimizer
 loss_fn = nn.MSELoss()
 optimizer = optim.Adam(model.parameters(), lr=0.001)
-images_tensor=images_tensor = torch.load('/Users/karim/desktop/eece499/TCN_SINDy/image_tensors.pt')
+images_tensor=images_tensor = torch.load('/Users/karim/desktop/eece499/TCN_SINDy/data_processing/image_tensors.pt')
 
 
 #X_current and X_future assuming m = 1 for simplicity
@@ -95,9 +95,6 @@ X_future = images_tensor[1:]    #all but the first
 num_epochs_phase1 = 10
 num_epochs_phase2 = 5
 
-converged = False
-patience = 2
-min_delta = 0.01 
 losses = []
 
 def train_autoencoder():
@@ -114,12 +111,6 @@ def train_autoencoder():
         optimizer.step()
         print(f"Epoch: {epoch}, Loss: {loss.item():.4f}")
     
-        if epoch > 0 and (losses[-2] - losses[-1] < min_delta):
-            if patience > 0:
-                patience -= 1
-            else:
-                print("Early stopping as the model has converged.")
-                converged=True
 
 converged = False
 losses = []
@@ -146,13 +137,6 @@ def train_koopman():
             latent_values_no_k.append(latent_at_i_plus_m.detach().cpu().numpy())
 
         print(f"Epoch: {epoch}, Loss: {loss.item():.4f}")
-
-        if epoch > 0 and (losses[-2] - losses[-1] < min_delta):
-            if patience > 0:
-                patience -= 1
-            else:
-                print("Early stopping as the model has converged.")
-                converged=True
 
     latent_values_k = np.vstack(latent_values_k)
     latent_values_no_k = np.vstack(latent_values_no_k)
