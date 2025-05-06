@@ -88,7 +88,78 @@ X_future = images_tensor[1:]    #all but the first
 
 # Training loop
 num_epochs = 20
-    
+
+def train_combined_with_physics(alpha=0.0292, beta=0.0025, lambda_phys=10, lambda_damp=5, lambda_energy=5, lambda_orth=1, smooth_weight=0.1):
+    model.train()
+    latent_vars_no_k_history = []
+    latent_vars_k_history = []
+
+    for epoch in range(num_epochs):
+        total_loss = 0
+        optimizer.zero_grad()
+        
+        # Full autoencoding
+        reconstructed, latent_vars = model(images_tensor)
+        reconstructed = reconstructed[:, :, :images_tensor.shape[2], :images_tensor.shape[3]]
+        autoencoder_loss = loss_fn(reconstructed, images_tensor)
+
+        # Koopman loss
+        koopman_loss = 0
+        for i in range(len(X_current)):
+            x_at_i_plus_m, latent_at_i_plus_m = model(X_future[i].unsqueeze(0))  
+            reconstructed_k, latent_at_i_plus_m_with_K = model(X_current[i].unsqueeze(0), True, 1)
+            reconstructed_k = reconstructed_k[:, :, :images_tensor.shape[2], :images_tensor.shape[3]]
+
+            koopman_loss += loss_fn(latent_at_i_plus_m, latent_at_i_plus_m_with_K)
+            koopman_loss += loss_fn(X_future[i].unsqueeze(0), reconstructed_k)
+
+            if epoch == num_epochs - 1:
+                latent_vars_no_k_history.append(latent_at_i_plus_m.detach().cpu().numpy())
+                latent_vars_k_history.append(latent_at_i_plus_m_with_K.detach().cpu().numpy())
+        
+        koopman_loss /= len(X_current)
+
+        # Physics-informed losses
+        latent_x = latent_vars[:, 0]
+        latent_v = latent_vars[:, 1]
+
+        # 1. dx/dt ≈ v
+        dx_dt = latent_x[1:] - latent_x[:-1]
+        v_trim = latent_v[:-1]
+        phys_loss = lambda_phys * F.mse_loss(dx_dt, v_trim)
+
+        # 2. dv/dt ≈ -αx - βv
+        dv_dt = latent_v[1:] - latent_v[:-1]
+        x_trim = latent_x[1:]
+        v_trim2 = latent_v[1:]
+        expected_acc = -alpha * x_trim - beta * v_trim2
+        damp_loss = lambda_damp * F.mse_loss(dv_dt, expected_acc)
+
+        # 3. Energy decay loss
+        energy = latent_x**2 + latent_v**2
+        energy_diff = energy[1:] - energy[:-1]
+        energy_decay_loss = lambda_energy * F.relu(energy_diff).mean()
+
+        # 4. Orthogonality loss
+        orthogonality_loss = lambda_orth * torch.mean(latent_x * latent_v)
+
+        # 5. Smoothness loss
+        smooth = torch.mean((latent_vars[1:] - latent_vars[:-1])**2) * smooth_weight
+
+        # Total loss
+        total_loss = autoencoder_loss + koopman_loss + phys_loss + damp_loss + energy_decay_loss + orthogonality_loss + smooth
+
+        total_loss.backward()
+        optimizer.step()
+        
+        print(f"Epoch: {epoch}, Total Loss: {total_loss.item():.4f}")
+
+    latent_vars_k_history = np.vstack(latent_vars_k_history)
+    latent_vars_no_k_history = np.vstack(latent_vars_no_k_history)
+
+    return latent_vars_no_k_history, latent_vars_k_history
+
+'''
 def train_combined():
     model.train()
     latent_vars_no_k_history = []  # To store latent variables without Koopman
@@ -134,6 +205,7 @@ def train_combined():
 
 latent_vars_no_k_history, latent_vars_k_history = train_combined()
 
+'''
 
 def plot_latent_variables(latent_values_no_k, latent_values_k):
 
